@@ -1,0 +1,183 @@
+name: macOS Native Compatibility
+
+on:
+  push:
+    branches:
+      - feat/macos-native-desktop
+    paths:
+      - "desktop/macos/**"
+      - ".github/workflows/macos-native-compatibility.yml"
+      - "cvat/**"
+      - "cvat-ui/**"
+      - "utils/dataset_manifest/**"
+      - "package.json"
+      - "yarn.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-silicon:
+    name: Native dependency and UI build (Apple Silicon)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DATUMARO_HEADLESS: "1"
+      DISABLE_HUSKY: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          brew install \
+            autoconf automake cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
+            openldap opa pkgconf postgresql@15 redis
+
+      - name: Configure native library paths
+        shell: bash
+        run: |
+          OPENLDAP_PREFIX="$(brew --prefix openldap)"
+          SASL_PREFIX="$(brew --prefix cyrus-sasl)"
+          XMLSEC_PREFIX="$(brew --prefix libxmlsec1)"
+          LIBXML2_PREFIX="$(brew --prefix libxml2)"
+          {
+            echo "PATH=$(brew --prefix postgresql@15)/bin:$PATH"
+            echo "CPPFLAGS=-I$OPENLDAP_PREFIX/include -I$SASL_PREFIX/include -I$XMLSEC_PREFIX/include -I$LIBXML2_PREFIX/include"
+            echo "LDFLAGS=-L$OPENLDAP_PREFIX/lib -L$SASL_PREFIX/lib -L$XMLSEC_PREFIX/lib -L$LIBXML2_PREFIX/lib"
+            echo "PKG_CONFIG_PATH=$OPENLDAP_PREFIX/lib/pkgconfig:$SASL_PREFIX/lib/pkgconfig:$XMLSEC_PREFIX/lib/pkgconfig:$LIBXML2_PREFIX/lib/pkgconfig"
+            echo "XMLSEC1_CONFIG=$XMLSEC_PREFIX/bin/xmlsec1-config"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            cvat/requirements/base.txt
+            cvat/requirements/production.txt
+            utils/dataset_manifest/requirements.txt
+
+      - name: Install CVAT backend requirements natively
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r cvat/requirements/production.txt
+          python -m pip check
+
+      - name: Import-check native Python modules
+        run: |
+          python - <<'PY'
+          import av
+          import cv2
+          import django
+          import ldap
+          import psycopg2
+          import shapely
+          import xmlsec
+
+          print("PyAV:", av.__version__)
+          print("OpenCV:", cv2.__version__)
+          print("Django:", django.get_version())
+          print("Shapely:", shapely.__version__)
+          print("python-ldap, psycopg2 and xmlsec: import OK")
+          PY
+          python -m compileall -q cvat utils/dataset_manifest manage.py
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: yarn
+
+      - name: Install frontend dependencies
+        run: |
+          corepack enable
+          yarn --version
+          yarn install --immutable
+
+      - name: Build the CVAT React frontend
+        run: |
+          CLIENT_PLUGINS="" SOURCE_MAPS_ENABLED="false" yarn run build:cvat-ui
+          test -s cvat-ui/dist/index.html
+
+      - name: Build the pinned Kvrocks service for macOS ARM64
+        run: |
+          git clone --depth 1 --branch 2.15.0 https://github.com/apache/kvrocks.git "$RUNNER_TEMP/kvrocks"
+          cd "$RUNNER_TEMP/kvrocks"
+          ./x.py build -DCMAKE_BUILD_TYPE=Release
+          test -x build/kvrocks
+          build/kvrocks --version
+
+      - name: Smoke-test native service binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/cvat-native-smoke"
+          mkdir -p "$WORK/pg" "$WORK/kvrocks-data" "$WORK/kvrocks-log"
+
+          initdb -D "$WORK/pg" -U cvat -A trust
+          pg_ctl -D "$WORK/pg" -l "$WORK/postgres.log" -o "-h 127.0.0.1 -p 55432" -w start
+          createdb -h 127.0.0.1 -p 55432 -U cvat cvat
+          pg_isready -h 127.0.0.1 -p 55432
+
+          redis-server --bind 127.0.0.1 --port 56379 --save "" --appendonly no \
+            >"$WORK/redis.log" 2>&1 &
+          REDIS_PID=$!
+
+          opa run --server --addr=127.0.0.1:58181 \
+            >"$WORK/opa.log" 2>&1 &
+          OPA_PID=$!
+
+          cat > "$WORK/kvrocks.conf" <<EOF
+          bind 127.0.0.1
+          port 56666
+          daemonize no
+          log-dir $WORK/kvrocks-log
+          db-path $WORK/kvrocks-data
+          EOF
+          "$RUNNER_TEMP/kvrocks/build/kvrocks" -c "$WORK/kvrocks.conf" \
+            >"$WORK/kvrocks-console.log" 2>&1 &
+          KVROCKS_PID=$!
+
+          cleanup() {
+            kill "$REDIS_PID" "$OPA_PID" "$KVROCKS_PID" 2>/dev/null || true
+            pg_ctl -D "$WORK/pg" -m fast -w stop || true
+          }
+          trap cleanup EXIT
+
+          for attempt in {1..30}; do
+            redis-cli -h 127.0.0.1 -p 56379 ping >/dev/null 2>&1 && break
+            sleep 1
+          done
+          redis-cli -h 127.0.0.1 -p 56379 ping | grep -q PONG
+
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:58181/health >/dev/null && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:58181/health >/dev/null
+
+          for attempt in {1..30}; do
+            redis-cli -h 127.0.0.1 -p 56666 ping >/dev/null 2>&1 && break
+            sleep 1
+          done
+          redis-cli -h 127.0.0.1 -p 56666 ping | grep -q PONG
+
+      - name: Upload native compatibility evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvat-macos-arm64-compatibility-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            cvat-ui/dist/
+            ${{ runner.temp }}/kvrocks/build/kvrocks
