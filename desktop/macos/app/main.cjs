@@ -1,0 +1,203 @@
+const path = require("node:path");
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const {
+  app, BrowserWindow, dialog, clipboard, Menu, shell, safeStorage,
+} = require("electron");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
+const { createRuntime } = require("./runtime.cjs");
+
+let mainWindow = null;
+let runtime = null;
+let runtimeInfo = null;
+let quitInProgress = false;
+let storedCredentialsPath = null;
+
+function resourcePath() {
+  return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "../../..");
+}
+
+function sendStatus(message) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("cvat:status", { message });
+  }
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 940,
+    minWidth: 1000,
+    minHeight: 680,
+    title: "CVAT Desktop",
+    backgroundColor: "#17191e",
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+    if (!quitInProgress) app.quit();
+  });
+  mainWindow.loadFile(path.join(__dirname, "splash.html"));
+}
+
+function readStoredCredentials() {
+  if (!storedCredentialsPath || !fs.existsSync(storedCredentialsPath)) return null;
+  const raw = fs.readFileSync(storedCredentialsPath, "utf8");
+  if (raw.startsWith("encrypted:")) {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    return JSON.parse(safeStorage.decryptString(Buffer.from(raw.slice(10), "base64")));
+  }
+  return JSON.parse(raw);
+}
+
+async function showSavedPassword() {
+  const credentials = readStoredCredentials();
+  if (!credentials) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      message: "No readable recovery password is stored.",
+      detail: "You can reset the local administrator password using the CVAT Desktop support instructions.",
+    });
+    return;
+  }
+  clipboard.writeText(credentials.password);
+  await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    message: "The local administrator password was copied to the clipboard.",
+    detail: "Username: " + credentials.username + "\nThe password exists only on this Mac.",
+  });
+}
+
+function buildMenu() {
+  const template = [
+    {
+      label: "CVAT Desktop",
+      submenu: [
+        {
+          label: "Open CVAT",
+          click: () => {
+            if (mainWindow && runtimeInfo) mainWindow.loadURL(runtimeInfo.url);
+          },
+        },
+        {
+          label: "Show local administrator password",
+          click: showSavedPassword,
+        },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: "CVAT Desktop source",
+          click: () => shell.openExternal("https://github.com/Omid-0x0x0x/cvat/tree/feat/macos-native-app/desktop/macos"),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+async function ensureLocalAdmin() {
+  const venvPython = runtimeInfo.python;
+  const backendDir = runtimeInfo.backendDir;
+  storedCredentialsPath = path.join(app.getPath("userData"), "local-admin.json");
+
+  const inspectCode = [
+    "from django.contrib.auth import get_user_model",
+    "User = get_user_model()",
+    "print('1' if User.objects.filter(is_superuser=True).exists() else '0')",
+  ].join("; ");
+  const inspect = await execFileAsync(venvPython, ["manage.py", "shell", "-c", inspectCode], {
+    cwd: backendDir,
+    env: runtimeInfo.env,
+    maxBuffer: 1024 * 1024,
+  });
+
+  if (inspect.stdout.trim().endsWith("1")) return;
+
+  const username = "admin";
+  const password = crypto.randomBytes(24).toString("base64url");
+  const createCode = [
+    "import os",
+    "from django.contrib.auth import get_user_model",
+    "User = get_user_model()",
+    "User.objects.create_superuser(username=os.environ['CVAT_DESKTOP_ADMIN_USER'], email='admin@localhost', password=os.environ['CVAT_DESKTOP_ADMIN_PASSWORD'])",
+  ].join("; ");
+  const childEnv = {
+    ...runtimeInfo.env,
+    CVAT_DESKTOP_ADMIN_USER: username,
+    CVAT_DESKTOP_ADMIN_PASSWORD: password,
+  };
+  await execFileAsync(venvPython, ["manage.py", "shell", "-c", createCode], {
+    cwd: backendDir,
+    env: childEnv,
+    maxBuffer: 1024 * 1024,
+  });
+
+  const payload = JSON.stringify({ username, password });
+  if (safeStorage.isEncryptionAvailable()) {
+    const encrypted = safeStorage.encryptString(payload).toString("base64");
+    fs.writeFileSync(storedCredentialsPath, "encrypted:" + encrypted, { mode: 0o600 });
+  } else {
+    fs.writeFileSync(storedCredentialsPath, payload, { mode: 0o600 });
+  }
+  clipboard.writeText(password);
+  await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "Local CVAT administrator created",
+    message: "Your local CVAT administrator account is ready.",
+    detail: "Username: admin\nThe generated password has been copied to your clipboard. You can retrieve it later from the CVAT Desktop menu.",
+  });
+}
+
+async function start() {
+  createWindow();
+  buildMenu();
+  runtime = createRuntime({
+    resourcesDir: resourcePath(),
+    userDataDir: app.getPath("userData"),
+    onStatus: ({ message }) => sendStatus(message),
+  });
+
+  try {
+    runtimeInfo = await runtime.start();
+    await ensureLocalAdmin();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.loadURL(runtimeInfo.url);
+    }
+  } catch (error) {
+    console.error(error);
+    await dialog.showMessageBox(mainWindow, {
+      type: "error",
+      title: "CVAT Desktop could not start",
+      message: "The native CVAT runtime did not start.",
+      detail: String(error && (error.stack || error.message) || error) +
+        "\n\nLogs are available in: " + path.join(app.getPath("userData"), "logs"),
+    });
+    app.quit();
+  }
+}
+
+app.whenReady().then(start);
+
+app.on("before-quit", (event) => {
+  if (!runtime || quitInProgress) return;
+  event.preventDefault();
+  quitInProgress = true;
+  runtime.stop().finally(() => app.exit(0));
+});
+
+app.on("window-all-closed", () => app.quit());
