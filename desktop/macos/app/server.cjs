@@ -85,6 +85,9 @@ function sendStatic(res, root, pathname, fallback = false) {
 function proxy(req, res, backendUrl) {
   const upstream = new URL(req.url, backendUrl);
   const headers = { ...req.headers, host: upstream.host };
+  headers["x-forwarded-host"] = req.headers.host || upstream.host;
+  headers["x-forwarded-proto"] = "http";
+  headers["x-forwarded-for"] = req.socket.remoteAddress || "127.0.0.1";
   delete headers["accept-encoding"];
 
   const proxyReq = http.request({
