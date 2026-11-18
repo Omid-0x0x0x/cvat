@@ -1,0 +1,54 @@
+{
+  "name": "cvat-desktop-macos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native macOS desktop host for CVAT Community",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "45.3.4",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "ai.cvat.desktop",
+    "productName": "CVAT Desktop",
+    "asar": false,
+    "directories": { "output": "dist" },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "runtime.cjs",
+      "server.cjs",
+      "splash.html"
+    ],
+    "extraResources": [
+      { "from": "../runtime", "to": "runtime" },
+      {
+        "from": "../../../cvat",
+        "to": "backend/cvat",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      {
+        "from": "../../../utils",
+        "to": "backend/utils",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      { "from": "../../../manage.py", "to": "backend/manage.py" },
+      { "from": "../../../rqscheduler.py", "to": "backend/rqscheduler.py" },
+      { "from": "../../../cvat-ui/dist", "to": "frontend" },
+      { "from": "vendor", "to": "vendor" }
+    ],
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "minimumSystemVersion": "15.0",
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    },
+    "dmg": {
+      "artifactName": "CVAT-Desktop-${version}-mac-arm64.dmg"
+    }
+  }
+}
