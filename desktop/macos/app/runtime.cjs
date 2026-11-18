@@ -239,12 +239,12 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
 
     status("Starting local policy service…");
     startProcess("opa", opaBinary, [
-      "run", "--server", "--addr=127.0.0.1:" + PORTS.opa,
+      "run", "--server", "--addr=127.0.0.1:" + PORTS.opa, "--log-level=error",
       "--set=services.cvat.url=http://127.0.0.1:" + PORTS.backend,
       "--set=bundles.cvat.service=cvat",
       "--set=bundles.cvat.resource=/api/auth/rules",
-      "--set=bundles.cvat.polling.min_delay_seconds=10",
-      "--set=bundles.cvat.polling.max_delay_seconds=30",
+      "--set=bundles.cvat.polling.min_delay_seconds=5",
+      "--set=bundles.cvat.polling.max_delay_seconds=15",
     ]);
 
     await Promise.all([waitForPort(PORTS.postgres), waitForPort(PORTS.redis), waitForPort(PORTS.kvrocks), waitForPort(PORTS.opa)]);
