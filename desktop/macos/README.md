@@ -1,60 +1,43 @@
-# CVAT Desktop for macOS (Native, Docker-free)
+# CVAT Desktop for macOS
 
-## Status
+This is the native, Docker-free desktop distribution work in progress.
 
-This directory is the beginning of the native macOS distribution effort. It is **not yet a
-working desktop application** and it must not be advertised as a release. The first milestone
-is a real Apple Silicon compatibility build of the existing CVAT backend dependencies and UI.
+## Product goal
 
-The target is a local application that runs CVAT services directly on macOS. Docker and a
-separate browser are not part of the target design.
+- An Electron/Chromium macOS app; no external browser tab.
+- Native CVAT services bound to loopback only.
+- Projects and service data persist under macOS Application Support.
+- Docker is not used.
 
-## Why this is a separate porting task
+## Current app bootstrap design
 
-The current CVAT deployment is a multi-process server stack, not just the React UI. The
-repository's Docker deployment starts PostgreSQL, two Redis-protocol stores (Redis and
-Kvrocks), the Django/ASGI server, several RQ workers, OPA, the UI, and a reverse proxy.
-Analytics adds ClickHouse, Vector, and Grafana.
+The first launch checks for Homebrew and installs missing native prerequisites:
+Python 3.12, PostgreSQL 15, Redis, FFmpeg, OpenLDAP, Cyrus SASL, XMLSec, Cairo, and Pango.
+It then creates a private Python virtual environment in Application Support, installs the
+CVAT production requirements, initializes PostgreSQL, starts Redis, Kvrocks and OPA, runs
+Django and Redis migrations, and starts the API and RQ worker processes.
 
-The server image also prepares native libraries and media components (including FFmpeg,
-OpenH264, LDAP/SASL, and XML security). A macOS `.app` wrapper around the web UI alone would
-not be a working local CVAT installation.
+The app bundle is expected to contain:
+- The built CVAT React frontend.
+- CVAT backend source and Python requirements.
+- A native ARM64 Kvrocks binary.
+- An OPA binary.
+- The Electron application and local API/static-file proxy.
 
-## Intended product shape
+Homebrew is currently a first-run prerequisite. The app installs missing formulas itself,
+but a fully self-contained DMG without Homebrew or other external runtime dependencies
+requires additional dependency bundling and macOS compatibility tests.
 
-- Apple Silicon first (arm64); Intel can be added after the first native runtime works.
-- Electron/Chromium desktop window for the existing CVAT UI.
-- Native backend and worker processes managed by the desktop app.
-- Native PostgreSQL, Redis-compatible stores, and OPA; no Docker daemon.
-- Analytics disabled by default in the first local profile to keep the runtime smaller.
-- Persistent user data under `~/Library/Application Support/CVAT Desktop`, separate from
-  the replaceable application bundle.
-- A signed/notarized DMG can be added when the app bundle and its runtime are stable.
+## Build requirements
 
-## First milestone in CI
-
-`.github/workflows/macos-native-compatibility.yml` runs on a GitHub-hosted Apple Silicon
-macOS runner and attempts to:
-
-1. Install the native build libraries needed by Python packages.
-2. Install the pinned CVAT backend requirements using Python 3.12.
-3. Import-check the backend's native Python modules.
-4. Build the existing CVAT React UI.
-
-A successful run proves only that these source components build on the runner. It does **not**
-prove that PostgreSQL, the queue stores, OPA, all workers, and the desktop lifecycle work
-together natively. No DMG is published by this compatibility workflow.
+- Apple Silicon Mac.
+- macOS 15 or later.
+- GitHub Actions runner `macos-15` for release builds.
+- The DMG is not signed or notarized yet. A Developer ID certificate and Apple notarization
+  credentials are required for frictionless distribution outside the Mac App Store.
 
 ## Release gate
 
-Do not publish a user-facing macOS release until all of the following pass on Apple Silicon:
-
-- Database initialization/migrations and restart persistence.
-- Both queue backends, RQ workers, and scheduled jobs.
-- OPA policy evaluation and authentication.
-- Media upload, video decoding, annotation save/reload, import/export.
-- App startup/shutdown, crash recovery, and clean uninstall/update.
-- A clean-machine test without Docker, Homebrew, Python, Node, or manually installed services.
-
-The Homebrew packages used by CI are build-time tools only. They are not runtime requirements
-for the intended end-user DMG.
+Do not call this a stable release until a clean macOS 15 Apple Silicon machine has passed:
+service startup, database migrations, initial administrator account creation, task creation,
+video upload, annotation save/reload, import/export, update persistence, and clean shutdown.
