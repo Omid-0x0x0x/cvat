@@ -1,0 +1,185 @@
+name: CVAT Desktop for macOS (Apple Silicon)
+
+on:
+  push:
+    branches:
+      - feat/macos-native-app
+    paths:
+      - "desktop/macos/**"
+      - ".github/workflows/macos-desktop-build.yml"
+      - "cvat/**"
+      - "cvat-ui/**"
+      - "utils/dataset_manifest/**"
+      - "package.json"
+      - "yarn.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    name: Build, test and package CVAT Desktop (macOS 15 ARM64)
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      DATUMARO_HEADLESS: "1"
+      DISABLE_HUSKY: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      PYTHONUNBUFFERED: "1"
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          brew install \
+            autoconf automake cairo cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
+            openldap opa pango pkgconf postgresql@15 python@3.12 redis
+
+      - name: Configure native library paths
+        shell: bash
+        run: |
+          OPENLDAP_PREFIX="$(brew --prefix openldap)"
+          SASL_PREFIX="$(brew --prefix cyrus-sasl)"
+          XMLSEC_PREFIX="$(brew --prefix libxmlsec1)"
+          LIBXML2_PREFIX="$(brew --prefix libxml2)"
+          {
+            echo "PATH=$(brew --prefix python@3.12)/bin:$(brew --prefix postgresql@15)/bin:$PATH"
+            echo "CPPFLAGS=-I$OPENLDAP_PREFIX/include -I$SASL_PREFIX/include -I$XMLSEC_PREFIX/include -I$LIBXML2_PREFIX/include"
+            echo "LDFLAGS=-L$OPENLDAP_PREFIX/lib -L$SASL_PREFIX/lib -L$XMLSEC_PREFIX/lib -L$LIBXML2_PREFIX/lib"
+            echo "PKG_CONFIG_PATH=$OPENLDAP_PREFIX/lib/pkgconfig:$SASL_PREFIX/lib/pkgconfig:$XMLSEC_PREFIX/lib/pkgconfig:$LIBXML2_PREFIX/lib/pkgconfig"
+            echo "XMLSEC1_CONFIG=$XMLSEC_PREFIX/bin/xmlsec1-config"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore native pkg-config paths
+        shell: bash
+        run: |
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix cairo)/lib/pkgconfig:$(brew --prefix pango)/lib/pkgconfig:$(brew --prefix pixman)/lib/pkgconfig:$(brew --prefix openldap)/lib/pkgconfig:$(brew --prefix cyrus-sasl)/lib/pkgconfig:$(brew --prefix libxmlsec1)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            cvat/requirements/base.txt
+            cvat/requirements/production.txt
+            utils/dataset_manifest/requirements.txt
+
+      - name: Install CVAT backend requirements
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r cvat/requirements/production.txt
+          python -m pip check
+          python -m compileall -q cvat utils/dataset_manifest manage.py
+
+      - name: Check native Python modules
+        run: |
+          python - <<'PY'
+          import av, cv2, django, ldap, psycopg2, shapely, xmlsec
+          print("PyAV:", av.__version__)
+          print("OpenCV:", cv2.__version__)
+          print("Django:", django.get_version())
+          print("Shapely:", shapely.__version__)
+          print("LDAP, PostgreSQL and XMLSec imports: OK")
+          PY
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Activate repository-pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.9.2 --activate
+          yarn --version
+
+      - name: Install frontend dependencies
+        run: yarn install --immutable
+
+      - name: Build CVAT frontend
+        run: |
+          CLIENT_PLUGINS="" SOURCE_MAPS_ENABLED="false" yarn run build:cvat-ui
+          test -s cvat-ui/dist/index.html
+
+      - name: Build Kvrocks for the macOS 15 ARM64 target
+        run: |
+          git clone --depth 1 --branch v2.15.0 https://github.com/apache/kvrocks.git "$RUNNER_TEMP/kvrocks"
+          cd "$RUNNER_TEMP/kvrocks"
+          ./x.py build -DCMAKE_BUILD_TYPE=Release
+          test -x build/kvrocks
+          build/kvrocks --version
+
+      - name: Stage native service binaries for desktop runtime
+        run: |
+          mkdir -p desktop/macos/app/vendor
+          cp "$RUNNER_TEMP/kvrocks/build/kvrocks" desktop/macos/app/vendor/kvrocks
+          cp -L "$(command -v opa)" desktop/macos/app/vendor/opa
+          chmod 755 desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
+          file desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
+          otool -L desktop/macos/app/vendor/kvrocks | tee "$RUNNER_TEMP/kvrocks-dylibs.txt"
+          otool -L desktop/macos/app/vendor/opa | tee "$RUNNER_TEMP/opa-dylibs.txt"
+
+      - name: Stage resources and run the actual desktop runtime
+        shell: bash
+        run: |
+          RESOURCES="$RUNNER_TEMP/cvat-desktop-test-resources"
+          USERDATA="$RUNNER_TEMP/cvat-desktop-test-userdata"
+          mkdir -p "$RESOURCES/backend" "$RESOURCES/runtime" "$RESOURCES/frontend" "$RESOURCES/vendor"
+          cp -R cvat "$RESOURCES/backend/cvat"
+          cp -R utils "$RESOURCES/backend/utils"
+          cp manage.py rqscheduler.py "$RESOURCES/backend/"
+          cp desktop/macos/runtime/cvat_desktop_settings.py "$RESOURCES/runtime/"
+          cp -R cvat-ui/dist/. "$RESOURCES/frontend/"
+          cp desktop/macos/app/vendor/kvrocks "$RESOURCES/vendor/kvrocks"
+          cp desktop/macos/app/vendor/opa "$RESOURCES/vendor/opa"
+          node --check desktop/macos/app/main.cjs
+          node --check desktop/macos/app/preload.cjs
+          node --check desktop/macos/app/runtime.cjs
+          node --check desktop/macos/app/server.cjs
+          CVAT_TEST_RESOURCES="$RESOURCES" CVAT_TEST_USERDATA="$USERDATA" \
+            node desktop/macos/scripts/runtime-launch-smoke.cjs
+
+      - name: Install Electron packaging dependencies
+        working-directory: desktop/macos/app
+        run: npm install --no-audit --no-fund
+
+      - name: Package CVAT Desktop DMG
+        working-directory: desktop/macos/app
+        run: npm run dist
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CVAT-Desktop-macOS-arm64-${{ github.sha }}
+          path: desktop/macos/app/dist/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub preview release
+        if: success() && github.ref == 'refs/heads/feat/macos-native-app'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="macos-desktop-v0.1.0-preview"
+          DMG=(desktop/macos/app/dist/*.dmg)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${DMG[@]}" --clobber
+          else
+            gh release create "$TAG" "${DMG[@]}" \
+              --title "CVAT Desktop for macOS — Preview 0.1.0" \
+              --notes-file desktop/macos/RELEASE-NOTES.md \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
