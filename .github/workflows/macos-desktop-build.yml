@@ -42,7 +42,7 @@ jobs:
       # the libraries are copied into the app and checked by the "Verify" step.
       - name: Install build-time dependencies
         run: |
-          brew install autoconf automake cmake cyrus-sasl libtool libxmlsec1 openldap pkgconf
+          brew install autoconf automake cmake cyrus-sasl libtool libxmlsec1 openldap openssl@3 pkgconf
 
       - name: Bundle Python 3.12 (python-build-standalone)
         shell: bash
@@ -123,14 +123,16 @@ jobs:
           "$PY" -m pip check
           "$PY" -m compileall -q cvat utils/dataset_manifest manage.py
 
-      - name: Bundle native libraries used by Python extension modules
+      - name: Bundle native libraries used by Python and PostgreSQL extensions
         shell: bash
         run: |
           set -euo pipefail
           VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
           PY="$VENDOR/python/bin/python3"
+          # PostgreSQL's optional extensions (dblink, pgcrypto, ...) are included too: some of them
+          # point at the build machine's libpq path or at Homebrew's OpenSSL.
           "$PY" desktop/macos/scripts/relocate_macho.py relocate \
-            --lib-dir "$VENDOR/lib" "$VENDOR/python/lib/python3.12/site-packages"
+            --lib-dir "$VENDOR/lib" "$VENDOR/python/lib/python3.12/site-packages" "$VENDOR/postgres"
           "$PY" - <<'PY'
           import av, cv2, django, ldap, psycopg2, shapely, xmlsec
           print("PyAV:", av.__version__)

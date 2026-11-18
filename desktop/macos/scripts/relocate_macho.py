@@ -96,9 +96,24 @@ def sign(path: Path) -> None:
     run("codesign", "--force", "--sign", "-", str(path))
 
 
+def index_bundled_dylibs(roots, lib_dir: Path) -> dict:
+    """Map file name -> path for every .dylib already inside the bundle (symlinks included)."""
+    index = {}
+    for root in list(roots) + [lib_dir]:
+        root = Path(root)
+        if not root.is_dir():
+            continue
+        for current, _dirs, files in os.walk(root):
+            for name in sorted(files):
+                if name.endswith(".dylib"):
+                    index.setdefault(name, (Path(current) / name).resolve(strict=False))
+    return index
+
+
 def relocate(lib_dir: Path, roots) -> int:
     lib_dir.mkdir(parents=True, exist_ok=True)
     lib_dir = lib_dir.resolve()
+    bundled = index_bundled_dylibs(roots, lib_dir)
     queue = [path.resolve() for path in iter_macho(roots)]
     seen = set()
     touched = 0
@@ -114,15 +129,22 @@ def relocate(lib_dir: Path, roots) -> int:
             if not is_external(dependency):
                 continue
             name = os.path.basename(dependency)
-            destination = lib_dir / name
-            if not destination.exists():
-                source = Path(os.path.realpath(dependency))
-                if not source.exists():
-                    raise SystemExit(f"{current}: dependency {dependency} does not exist")
-                shutil.copy2(source, destination)
-                make_writable(destination)
-                queue.append(destination)
-            relative = os.path.relpath(lib_dir, current.parent)
+            if name in bundled:
+                # The same library already ships in the bundle (for example PostgreSQL's own
+                # libpq, which its extensions reference by the absolute path of the build machine).
+                target_dir = bundled[name].parent
+            else:
+                destination = lib_dir / name
+                if not destination.exists():
+                    source = Path(os.path.realpath(dependency))
+                    if not source.exists():
+                        raise SystemExit(f"{current}: dependency {dependency} does not exist")
+                    shutil.copy2(source, destination)
+                    make_writable(destination)
+                    queue.append(destination)
+                bundled[name] = destination
+                target_dir = lib_dir
+            relative = os.path.relpath(target_dir, current.parent)
             prefix = "@loader_path" if relative == "." else f"@loader_path/{relative}"
             changes.append((dependency, f"{prefix}/{name}"))
 
