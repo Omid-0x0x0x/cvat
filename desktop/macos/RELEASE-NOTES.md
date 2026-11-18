@@ -1,6 +1,13 @@
-# CVAT Desktop for macOS — Preview 0.1.0
+# CVAT Desktop for macOS — Preview 0.2.0
 
 This is an experimental Apple Silicon desktop build of CVAT Community.
+
+## What is new in 0.2.0
+
+- **Self-contained.** Python 3.12, PostgreSQL 15, Redis, Kvrocks, OPA and the native libraries
+  they need are inside the app. **Homebrew and the Xcode Command Line Tools are no longer required**,
+  and nothing is installed on first launch.
+- Optional connection to a Nuclio server for auto-annotation (see below).
 
 ## Included
 
@@ -13,10 +20,16 @@ This is an experimental Apple Silicon desktop build of CVAT Community.
 ## Requirements and limitations
 
 - Apple Silicon (arm64), macOS 15 or newer.
-- Homebrew is required. On first launch the app installs missing native formulas and Python packages automatically.
-- Docker is not used.
-- This preview is unsigned and not notarized. macOS Gatekeeper may require Control-click > Open for the first launch.
-- Analytics/ClickHouse and Nuclio-based serverless auto-annotation functions are not included in this first local profile.
+- Docker is not used by the app.
+- This preview is unsigned and not notarized. macOS Gatekeeper may require Control-click > Open
+  (or System Settings > Privacy & Security > Open Anyway) for the first launch.
+- The download is large because the whole runtime is bundled.
+- Analytics/ClickHouse are not included.
+- **Auto-annotation:** Nuclio is not bundled, because it needs Docker or Kubernetes. If you run a
+  Nuclio server yourself, choose *CVAT Desktop → Auto-annotation (Nuclio) settings…* to connect the
+  app to it. See `desktop/macos/NUCLIO.md`. This path has not been tested end to end.
+- If you used 0.1.0, your data is kept. The `python-env` folder it created in Application Support is
+  no longer used and can be deleted.
 - This is a preview; validate it on a copy of important data and keep regular backups.
 
 The release is built from the CVAT fork's native macOS work branch. It is not an official CVAT.ai desktop release.

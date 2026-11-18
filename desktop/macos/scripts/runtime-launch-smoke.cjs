@@ -23,6 +23,15 @@ async function main() {
     const info = await runtime.start();
     console.log("Native runtime started:", info.url);
 
+    // The interpreter and every service must come from the app bundle, never from the system.
+    if (!info.python.startsWith(resourcesDir)) throw new Error("Python is not the bundled one: " + info.python);
+    const imports = await execFileAsync(info.python, ["-c", [
+      "import av, cv2, django, ldap, psycopg2, shapely, xmlsec, sys",
+      "print('bundled Python', sys.version.split()[0], 'from', sys.executable)",
+      "print('native modules: OK')",
+    ].join("; ")], { cwd: info.backendDir, env: info.env, maxBuffer: 1024 * 1024 });
+    process.stdout.write(imports.stdout);
+
     const pageResponse = await fetch(info.url + "/");
     if (!pageResponse.ok) throw new Error("Frontend returned HTTP " + pageResponse.status);
     const page = await pageResponse.text();

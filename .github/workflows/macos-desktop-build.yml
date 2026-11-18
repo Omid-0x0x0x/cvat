@@ -37,54 +37,101 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install native build dependencies
+      # Homebrew is used only on this CI runner, to compile a few Python extension
+      # modules and Kvrocks. Nothing from Homebrew is required on the user's Mac:
+      # the libraries are copied into the app and checked by the "Verify" step.
+      - name: Install build-time dependencies
         run: |
-          brew install \
-            autoconf automake cairo cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
-            openldap pango pkgconf postgresql@15 python@3.12 redis
+          brew install autoconf automake cmake cyrus-sasl libtool libxmlsec1 openldap pkgconf
 
-      - name: Configure native library paths
+      - name: Bundle Python 3.12 (python-build-standalone)
         shell: bash
         run: |
+          set -euo pipefail
+          PBS_TAG="20261026"
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          mkdir -p "$VENDOR" "$RUNNER_TEMP/pbs"
+          cd "$RUNNER_TEMP/pbs"
+          ASSET="$(gh api "repos/astral-sh/python-build-standalone/releases/tags/${PBS_TAG}" \
+            --jq '.assets[].name' | grep -E '^cpython-3\.12\.[0-9]+\+.*-aarch64-apple-darwin-install_only\.tar\.gz$' | sort -V | tail -n1)"
+          test -n "$ASSET"
+          echo "Using $ASSET"
+          BASE="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}"
+          curl -fsSL -o "$ASSET" "$BASE/${ASSET//+/%2B}"
+          curl -fsSL -o SHA256SUMS "$BASE/SHA256SUMS"
+          grep -F " ${ASSET}" SHA256SUMS | awk -v f="$ASSET" '{print $1 "  " f}' | shasum -a 256 -c -
+          tar -xzf "$ASSET"
+          rm -rf "$VENDOR/python"
+          mv python "$VENDOR/python"
+          "$VENDOR/python/bin/python3" --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Bundle PostgreSQL 15 (relocatable binaries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PG_TAG="15.19.0"
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          ASSET="postgresql-${PG_TAG}-aarch64-apple-darwin.tar.gz"
+          BASE="https://github.com/theseus-rs/postgresql-binaries/releases/download/${PG_TAG}"
+          mkdir -p "$RUNNER_TEMP/pg"
+          cd "$RUNNER_TEMP/pg"
+          curl -fsSL -o "$ASSET" "$BASE/$ASSET"
+          if curl -fsSL -o "$ASSET.sha256" "$BASE/$ASSET.sha256"; then
+            echo "$(awk '{print $1}' "$ASSET.sha256")  $ASSET" | shasum -a 256 -c -
+          else
+            echo "::warning::No checksum is published for $ASSET; computed: $(shasum -a 256 "$ASSET")"
+          fi
+          tar -xzf "$ASSET"
+          INITDB="$(find . -path '*/bin/initdb' -type f | head -n1)"
+          test -n "$INITDB"
+          PG_ROOT="$(cd "$(dirname "$INITDB")/.." && pwd)"
+          rm -rf "$VENDOR/postgres"
+          cp -a "$PG_ROOT" "$VENDOR/postgres"
+          ls "$VENDOR/postgres" "$VENDOR/postgres/bin"
+          "$VENDOR/postgres/bin/postgres" --version
+
+      - name: Build Redis 7.2.4 (last BSD-licensed release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          git clone --depth 1 --branch 7.2.4 https://github.com/redis/redis.git "$RUNNER_TEMP/redis"
+          make -C "$RUNNER_TEMP/redis" -j"$(sysctl -n hw.ncpu)" BUILD_TLS=no
+          cp "$RUNNER_TEMP/redis/src/redis-server" "$VENDOR/redis-server"
+          chmod 755 "$VENDOR/redis-server"
+          "$VENDOR/redis-server" --version
+
+      - name: Install CVAT backend requirements into the bundled Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          PY="$VENDOR/python/bin/python3"
           OPENLDAP_PREFIX="$(brew --prefix openldap)"
           SASL_PREFIX="$(brew --prefix cyrus-sasl)"
           XMLSEC_PREFIX="$(brew --prefix libxmlsec1)"
           LIBXML2_PREFIX="$(brew --prefix libxml2)"
-          {
-            echo "PATH=$(brew --prefix python@3.12)/bin:$(brew --prefix postgresql@15)/bin:$PATH"
-            echo "CPPFLAGS=-I$OPENLDAP_PREFIX/include -I$SASL_PREFIX/include -I$XMLSEC_PREFIX/include -I$LIBXML2_PREFIX/include"
-            echo "LDFLAGS=-L$OPENLDAP_PREFIX/lib -L$SASL_PREFIX/lib -L$XMLSEC_PREFIX/lib -L$LIBXML2_PREFIX/lib"
-            echo "PKG_CONFIG_PATH=$OPENLDAP_PREFIX/lib/pkgconfig:$SASL_PREFIX/lib/pkgconfig:$XMLSEC_PREFIX/lib/pkgconfig:$LIBXML2_PREFIX/lib/pkgconfig"
-            echo "XMLSEC1_CONFIG=$XMLSEC_PREFIX/bin/xmlsec1-config"
-          } >> "$GITHUB_ENV"
+          export CPPFLAGS="-I$OPENLDAP_PREFIX/include -I$SASL_PREFIX/include -I$XMLSEC_PREFIX/include -I$LIBXML2_PREFIX/include"
+          # headerpad leaves room to rewrite the library paths when they are bundled below
+          export LDFLAGS="-L$OPENLDAP_PREFIX/lib -L$SASL_PREFIX/lib -L$XMLSEC_PREFIX/lib -L$LIBXML2_PREFIX/lib -Wl,-headerpad_max_install_names"
+          export PKG_CONFIG_PATH="$OPENLDAP_PREFIX/lib/pkgconfig:$SASL_PREFIX/lib/pkgconfig:$XMLSEC_PREFIX/lib/pkgconfig:$LIBXML2_PREFIX/lib/pkgconfig"
+          export XMLSEC1_CONFIG="$XMLSEC_PREFIX/bin/xmlsec1-config"
+          "$PY" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+          "$PY" -m pip install --no-cache-dir -r cvat/requirements/production.txt
+          "$PY" -m pip check
+          "$PY" -m compileall -q cvat utils/dataset_manifest manage.py
 
-      - name: Restore native pkg-config paths
+      - name: Bundle native libraries used by Python extension modules
         shell: bash
         run: |
-          {
-            echo "PKG_CONFIG_PATH=$(brew --prefix cairo)/lib/pkgconfig:$(brew --prefix pango)/lib/pkgconfig:$(brew --prefix pixman)/lib/pkgconfig:$(brew --prefix openldap)/lib/pkgconfig:$(brew --prefix cyrus-sasl)/lib/pkgconfig:$(brew --prefix libxmlsec1)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-          } >> "$GITHUB_ENV"
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            cvat/requirements/base.txt
-            cvat/requirements/production.txt
-            utils/dataset_manifest/requirements.txt
-
-      - name: Install CVAT backend requirements
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -r cvat/requirements/production.txt
-          python -m pip check
-          python -m compileall -q cvat utils/dataset_manifest manage.py
-
-      - name: Check native Python modules
-        run: |
-          python - <<'PY'
+          set -euo pipefail
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          PY="$VENDOR/python/bin/python3"
+          "$PY" desktop/macos/scripts/relocate_macho.py relocate \
+            --lib-dir "$VENDOR/lib" "$VENDOR/python/lib/python3.12/site-packages"
+          "$PY" - <<'PY'
           import av, cv2, django, ldap, psycopg2, shapely, xmlsec
           print("PyAV:", av.__version__)
           print("OpenCV:", cv2.__version__)
@@ -112,49 +159,51 @@ jobs:
           CLIENT_PLUGINS="" SOURCE_MAPS_ENABLED="false" yarn run build:cvat-ui
           test -s cvat-ui/dist/index.html
 
+      - name: Restore cached Kvrocks build
+        id: kvrocks-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/kvrocks-bin/kvrocks
+          key: kvrocks-2.15.0-macos15-arm64-v1
+
       - name: Build Kvrocks for the macOS 15 ARM64 target
+        if: steps.kvrocks-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch v2.15.0 https://github.com/apache/kvrocks.git "$RUNNER_TEMP/kvrocks"
           cd "$RUNNER_TEMP/kvrocks"
-          ./x.py build -DCMAKE_BUILD_TYPE=Release
+          "$GITHUB_WORKSPACE/desktop/macos/app/vendor/python/bin/python3" ./x.py build -DCMAKE_BUILD_TYPE=Release
           test -x build/kvrocks
           build/kvrocks --version
+          mkdir -p "$RUNNER_TEMP/kvrocks-bin"
+          cp build/kvrocks "$RUNNER_TEMP/kvrocks-bin/kvrocks"
 
-      - name: Stage native service binaries for desktop runtime
+      - name: Cache the Kvrocks build
+        if: steps.kvrocks-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/kvrocks-bin/kvrocks
+          key: kvrocks-2.15.0-macos15-arm64-v1
+
+      - name: Stage Kvrocks and OPA
+        shell: bash
         run: |
-          mkdir -p desktop/macos/app/vendor
-          cp "$RUNNER_TEMP/kvrocks/build/kvrocks" desktop/macos/app/vendor/kvrocks
+          set -euo pipefail
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          cp "$RUNNER_TEMP/kvrocks-bin/kvrocks" "$VENDOR/kvrocks"
           OPA_VERSION="1.22.4"
-          curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static" -o desktop/macos/app/vendor/opa
+          curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static" -o "$VENDOR/opa"
           curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static.sha256" -o "$RUNNER_TEMP/opa.sha256"
           # The published .sha256 names the original download file, but we saved it as "opa",
           # so verify the hash against the local file name instead of using `shasum -c` on the raw file.
           EXPECTED_OPA_SHA="$(awk '{print $1}' "$RUNNER_TEMP/opa.sha256")"
-          echo "${EXPECTED_OPA_SHA}  desktop/macos/app/vendor/opa" | shasum -a 256 -c -
-          chmod 755 desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
-          file desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
-          otool -L desktop/macos/app/vendor/kvrocks | tee "$RUNNER_TEMP/kvrocks-dylibs.txt"
-          otool -L desktop/macos/app/vendor/opa | tee "$RUNNER_TEMP/opa-dylibs.txt"
+          echo "${EXPECTED_OPA_SHA}  $VENDOR/opa" | shasum -a 256 -c -
+          chmod 755 "$VENDOR/kvrocks" "$VENDOR/opa"
+          file "$VENDOR/kvrocks" "$VENDOR/opa"
 
-      - name: Stage resources and run the actual desktop runtime
-        shell: bash
+      - name: Verify the bundle needs no Homebrew libraries
         run: |
-          RESOURCES="$RUNNER_TEMP/cvat-desktop-test-resources"
-          USERDATA="$RUNNER_TEMP/cvat-desktop-test-userdata"
-          mkdir -p "$RESOURCES/backend" "$RESOURCES/runtime" "$RESOURCES/frontend" "$RESOURCES/vendor"
-          cp -R cvat "$RESOURCES/backend/cvat"
-          cp -R utils "$RESOURCES/backend/utils"
-          cp manage.py rqscheduler.py "$RESOURCES/backend/"
-          cp desktop/macos/runtime/cvat_desktop_settings.py "$RESOURCES/runtime/"
-          cp -R cvat-ui/dist/. "$RESOURCES/frontend/"
-          cp desktop/macos/app/vendor/kvrocks "$RESOURCES/vendor/kvrocks"
-          cp desktop/macos/app/vendor/opa "$RESOURCES/vendor/opa"
-          node --check desktop/macos/app/main.cjs
-          node --check desktop/macos/app/preload.cjs
-          node --check desktop/macos/app/runtime.cjs
-          node --check desktop/macos/app/server.cjs
-          CVAT_TEST_RESOURCES="$RESOURCES" CVAT_TEST_USERDATA="$USERDATA" \
-            node desktop/macos/scripts/runtime-launch-smoke.cjs
+          "$GITHUB_WORKSPACE/desktop/macos/app/vendor/python/bin/python3" \
+            desktop/macos/scripts/relocate_macho.py verify desktop/macos/app/vendor
 
       - name: Install Electron packaging dependencies
         working-directory: desktop/macos/app
@@ -163,6 +212,44 @@ jobs:
       - name: Package CVAT Desktop DMG
         working-directory: desktop/macos/app
         run: npm run dist
+
+      - name: Verify the packaged app needs no Homebrew libraries
+        run: |
+          APP="$(ls -d desktop/macos/app/dist/mac-arm64/*.app | head -n1)"
+          echo "Packaged app: $APP"
+          "$GITHUB_WORKSPACE/desktop/macos/app/vendor/python/bin/python3" \
+            desktop/macos/scripts/relocate_macho.py verify "$APP/Contents/Resources/vendor"
+          du -sh "$APP" desktop/macos/app/dist/*.dmg
+
+      # The real test: start every service from the packaged app with Homebrew moved
+      # out of the way and a minimal environment, as on a clean Mac.
+      - name: Hide Homebrew and run the packaged runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(ls -d "$GITHUB_WORKSPACE"/desktop/macos/app/dist/mac-arm64/*.app | head -n1)"
+          RESOURCES="$APP/Contents/Resources"
+          USERDATA="$RUNNER_TEMP/cvat-desktop-test-userdata"
+          NODE_DIR="$(dirname "$(command -v node)")"
+          sudo mv /opt/homebrew /opt/homebrew.hidden
+          test ! -e /opt/homebrew
+          env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" PATH="$NODE_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
+            CVAT_TEST_RESOURCES="$RESOURCES" CVAT_TEST_USERDATA="$USERDATA" \
+            node desktop/macos/scripts/runtime-launch-smoke.cjs
+
+      - name: Restore Homebrew
+        if: always()
+        run: |
+          if [ -e /opt/homebrew.hidden ] && [ ! -e /opt/homebrew ]; then sudo mv /opt/homebrew.hidden /opt/homebrew; fi
+
+      - name: Upload runtime logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvat-desktop-runtime-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/cvat-desktop-test-userdata/logs
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
@@ -178,13 +265,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          TAG="macos-desktop-v0.1.0-preview"
+          VERSION="$(node -p "require('./desktop/macos/app/package.json').version")"
+          TAG="macos-desktop-v${VERSION}-preview"
           DMG=(desktop/macos/app/dist/*.dmg)
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${DMG[@]}" --clobber
           else
             gh release create "$TAG" "${DMG[@]}" \
-              --title "CVAT Desktop for macOS — Preview 0.1.0" \
+              --title "CVAT Desktop for macOS — Preview ${VERSION}" \
               --notes-file desktop/macos/RELEASE-NOTES.md \
               --prerelease \
               --target "$GITHUB_SHA"

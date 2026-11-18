@@ -8,6 +8,49 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 const PORTS = { postgres: 25432, redis: 26379, kvrocks: 26666, opa: 28181, backend: 27000, desktop: 28080 };
+const SYSTEM_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+const INHERITED_ENV = ["HOME", "USER", "LOGNAME", "TMPDIR", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
+
+// Auto-annotation (serverless) needs a Nuclio dashboard, which in turn needs Docker or Kubernetes.
+// It is optional and configured through nuclio.json in the app's user-data directory.
+const NUCLIO_TEMPLATE = {
+  enabled: false,
+  scheme: "http",
+  host: "localhost",
+  port: 8070,
+  invokeMethod: "direct",
+  namespace: "nuclio",
+  timeoutSeconds: 120,
+};
+
+function nuclioConfigPath(userDataDir) { return path.join(userDataDir, "nuclio.json"); }
+
+function loadNuclioEnv(userDataDir) {
+  const file = nuclioConfigPath(userDataDir);
+  if (!fs.existsSync(file)) return {};
+  let config;
+  try {
+    config = { ...NUCLIO_TEMPLATE, ...JSON.parse(fs.readFileSync(file, "utf8")) };
+  } catch (error) {
+    throw new Error("Could not read " + file + ": " + error.message);
+  }
+  if (!config.enabled) return {};
+  if (!["http", "https"].includes(config.scheme)) throw new Error(file + ': "scheme" must be "http" or "https".');
+  if (!/^[A-Za-z0-9._-]+$/.test(String(config.host))) throw new Error(file + ': "host" is not a valid host name.');
+  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new Error(file + ': "port" must be 1-65535.');
+  if (!["direct", "dashboard"].includes(config.invokeMethod)) throw new Error(file + ': "invokeMethod" must be "direct" or "dashboard".');
+  if (!/^[A-Za-z0-9._-]+$/.test(String(config.namespace))) throw new Error(file + ': "namespace" is not valid.');
+  if (!Number.isInteger(config.timeoutSeconds) || config.timeoutSeconds < 1) throw new Error(file + ': "timeoutSeconds" must be a positive integer.');
+  return {
+    CVAT_SERVERLESS: "1",
+    CVAT_NUCLIO_SCHEME: config.scheme,
+    CVAT_NUCLIO_HOST: String(config.host),
+    CVAT_NUCLIO_PORT: String(config.port),
+    CVAT_NUCLIO_INVOKE_METHOD: config.invokeMethod,
+    CVAT_NUCLIO_FUNCTION_NAMESPACE: String(config.namespace),
+    CVAT_NUCLIO_DEFAULT_TIMEOUT: String(config.timeoutSeconds),
+  };
+}
 
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -45,7 +88,7 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
   let postgresStarted = false;
   let uiServer = null;
   let env = null;
-  let paths = null;
+  let pgBin = null;
   let stopped = false;
 
   const backendDir = path.join(resourcesDir, "backend");
@@ -94,34 +137,9 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     return child;
   }
 
-  async function ensureHomebrew() {
-    const candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", path.join(os.homedir(), ".homebrew", "bin", "brew")];
-    const brew = candidates.find((candidate) => fs.existsSync(candidate));
-    if (!brew) {
-      throw new Error("Homebrew is required for first launch. Install it from https://brew.sh, then reopen CVAT Desktop. Docker is not used.");
-    }
-
-    status("Checking native macOS dependencies…");
-    const formulas = ["python@3.12", "postgresql@15", "redis", "ffmpeg", "openldap", "cyrus-sasl", "libxmlsec1", "cairo", "pango"];
-    const missing = [];
-    for (const formula of formulas) {
-      try {
-        await execFileAsync(brew, ["list", "--versions", formula], { maxBuffer: 1024 * 1024 });
-      } catch {
-        missing.push(formula);
-      }
-    }
-    if (missing.length) {
-      status("Installing native macOS components (" + missing.length + ")…");
-      await command(brew, ["install", ...missing], { cwd: userDataDir, timeout: 30 * 60 * 1000 });
-    }
-
-    const prefixes = {};
-    for (const formula of formulas) {
-      const result = await execFileAsync(brew, ["--prefix", formula], { maxBuffer: 1024 * 1024 });
-      prefixes[formula] = result.stdout.trim();
-    }
-    return { brew, prefixes };
+  function requireFile(file, what) {
+    if (!fs.existsSync(file)) throw new Error("The packaged " + what + " is missing (" + file + "). This build is incomplete.");
+    return file;
   }
 
   async function initialize() {
@@ -133,30 +151,25 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
       throw new Error("The packaged CVAT backend or frontend is missing. This build is incomplete.");
     }
 
+    // Everything the app needs ships inside the bundle: no Homebrew, no Xcode tools, no network.
     status("Preparing native services…");
-    const homebrew = await ensureHomebrew();
-    paths = homebrew.prefixes;
-    const python = path.join(paths["python@3.12"], "bin", "python3.12");
-    const pgBin = path.join(paths["postgresql@15"], "bin");
-    const redisBin = path.join(paths.redis, "bin");
-    const xmlsecPrefix = paths["libxmlsec1"];
-    const ldapPrefix = paths.openldap;
-    const saslPrefix = paths["cyrus-sasl"];
-    const libxml2Prefix = (await execFileAsync(homebrew.brew, ["--prefix", "libxml2"])).stdout.trim();
+    const vendorDir = path.join(resourcesDir, "vendor");
+    const python = requireFile(path.join(vendorDir, "python", "bin", "python3"), "Python runtime");
+    pgBin = path.join(vendorDir, "postgres", "bin");
+    for (const tool of ["initdb", "pg_ctl", "createdb"]) requireFile(path.join(pgBin, tool), "PostgreSQL (" + tool + ")");
+    const redisBinary = requireFile(path.join(vendorDir, "redis-server"), "Redis server");
+    const kvrocksBinary = requireFile(path.join(vendorDir, "kvrocks"), "Kvrocks binary");
+    const opaBinary = requireFile(path.join(vendorDir, "opa"), "OPA binary");
 
-    const kvrocksBinary = path.join(resourcesDir, "vendor", "kvrocks");
-    const opaBinary = path.join(resourcesDir, "vendor", "opa");
-    if (!fs.existsSync(kvrocksBinary) || !fs.existsSync(opaBinary)) {
-      throw new Error("Native Kvrocks or OPA binaries are missing from this build.");
-    }
-
+    const baseEnv = {};
+    for (const key of INHERITED_ENV) if (process.env[key] !== undefined) baseEnv[key] = process.env[key];
     env = {
-      ...process.env,
-      PATH: [
-        path.join(paths["python@3.12"], "bin"), pgBin, redisBin,
-        path.dirname(kvrocksBinary), path.dirname(opaBinary), process.env.PATH || "",
-      ].join(path.delimiter),
+      ...baseEnv,
+      LANG: baseEnv.LANG || "en_US.UTF-8",
+      PATH: [path.dirname(python), pgBin, vendorDir, ...SYSTEM_PATH].join(path.delimiter),
       PYTHONPATH: runtimeDir + path.delimiter + backendDir,
+      PYTHONNOUSERSITE: "1",
+      PYTHONUTF8: "1",
       DJANGO_SETTINGS_MODULE: "cvat_desktop_settings",
       CVAT_BASE_DIR: path.join(userDataDir, "cvat-data"),
       CVAT_HOST: "127.0.0.1:28080",
@@ -173,16 +186,7 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
       CVAT_OPA_URL: "http://127.0.0.1:" + PORTS.opa,
       CVAT_ANALYTICS: "0",
       DATUMARO_HEADLESS: "1",
-      XMLSEC1_CONFIG: path.join(xmlsecPrefix, "bin", "xmlsec1-config"),
-      CPPFLAGS: [
-        "-I" + path.join(ldapPrefix, "include"), "-I" + path.join(saslPrefix, "include"),
-        "-I" + path.join(xmlsecPrefix, "include"), "-I" + path.join(libxml2Prefix, "include"),
-      ].join(" "),
-      LDFLAGS: [
-        "-L" + path.join(ldapPrefix, "lib"), "-L" + path.join(saslPrefix, "lib"),
-        "-L" + path.join(xmlsecPrefix, "lib"), "-L" + path.join(libxml2Prefix, "lib"),
-      ].join(" "),
-      PKG_CONFIG_PATH: ["openldap", "cyrus-sasl", "libxmlsec1", "cairo", "pango"].map((key) => path.join(paths[key], "lib", "pkgconfig")).concat([path.join(libxml2Prefix, "lib", "pkgconfig")]).join(path.delimiter),
+      ...loadNuclioEnv(userDataDir),
     };
 
     fs.mkdirSync(env.CVAT_BASE_DIR, { recursive: true });
@@ -191,22 +195,7 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     fs.mkdirSync(path.join(dataDir, "kvrocks"), { recursive: true });
     fs.mkdirSync(path.join(dataDir, "kvrocks-logs"), { recursive: true });
 
-    status("Preparing the Python environment…");
-    const venvDir = path.join(userDataDir, "python-env");
-    if (!fs.existsSync(path.join(venvDir, "bin", "python"))) {
-      await command(python, ["-m", "venv", venvDir], { cwd: userDataDir });
-    }
-    const venvPython = path.join(venvDir, "bin", "python");
-    const requirements = path.join(backendDir, "cvat", "requirements", "production.txt");
-    const marker = path.join(venvDir, ".cvat-requirements-" + require("crypto").createHash("sha256").update(fs.readFileSync(requirements)).digest("hex").slice(0, 12));
-    if (!fs.existsSync(marker)) {
-      status("Installing CVAT Python packages (first launch only)…");
-      await command(venvPython, ["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], { cwd: userDataDir, timeout: 10 * 60 * 1000 });
-      await command(venvPython, ["-m", "pip", "install", "-r", requirements], { cwd: backendDir, timeout: 45 * 60 * 1000 });
-      fs.writeFileSync(marker, new Date().toISOString());
-    }
-    env.PATH = path.join(venvDir, "bin") + path.delimiter + env.PATH;
-    paths.python = venvPython;
+    const venvPython = python;
 
     status("Starting PostgreSQL…");
     const pgData = path.join(dataDir, "postgres");
@@ -224,7 +213,7 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     }
 
     status("Starting Redis and the on-disk cache…");
-    startProcess("redis", path.join(redisBin, "redis-server"), [
+    startProcess("redis", redisBinary, [
       "--bind", "127.0.0.1", "--port", String(PORTS.redis),
       "--dir", path.join(dataDir, "redis"), "--appendonly", "yes",
     ]);
@@ -292,8 +281,8 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     }
     children.clear();
 
-    if (postgresStarted && paths && env) {
-      const pgCtl = path.join(paths["postgresql@15"], "bin", "pg_ctl");
+    if (postgresStarted && pgBin && env) {
+      const pgCtl = path.join(pgBin, "pg_ctl");
       try {
         await execFileAsync(pgCtl, ["-D", path.join(dataDir, "postgres"), "-m", "fast", "-w", "stop"], {
           env, maxBuffer: 1024 * 1024, timeout: 15000,
@@ -308,4 +297,4 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
   return { start: initialize, stop };
 }
 
-module.exports = { createRuntime, PORTS };
+module.exports = { createRuntime, PORTS, NUCLIO_TEMPLATE, nuclioConfigPath };

@@ -7,7 +7,7 @@ const {
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
-const { createRuntime } = require("./runtime.cjs");
+const { createRuntime, NUCLIO_TEMPLATE, nuclioConfigPath } = require("./runtime.cjs");
 
 let mainWindow = null;
 let runtime = null;
@@ -78,6 +78,24 @@ async function showSavedPassword() {
   });
 }
 
+async function openNuclioSettings() {
+  const file = nuclioConfigPath(app.getPath("userData"));
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(NUCLIO_TEMPLATE, null, 2) + "\n", { mode: 0o600 });
+  }
+  await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    message: "Auto-annotation uses a Nuclio server that you run yourself.",
+    detail: "The settings file will open now. Set \"enabled\" to true, adjust host and port if your Nuclio " +
+      "dashboard is not on localhost:8070, save the file and restart CVAT Desktop.\n\n" +
+      "Nuclio needs Docker or Kubernetes; it is not bundled in this app. " +
+      "See desktop/macos/NUCLIO.md in the CVAT Desktop source for setup steps.\n\n" + file,
+  });
+  const error = await shell.openPath(file);
+  if (error) shell.showItemInFolder(file);
+}
+
 function buildMenu() {
   const template = [
     {
@@ -92,6 +110,10 @@ function buildMenu() {
         {
           label: "Show local administrator password",
           click: showSavedPassword,
+        },
+        {
+          label: "Auto-annotation (Nuclio) settings…",
+          click: openNuclioSettings,
         },
         { type: "separator" },
         { role: "quit" },

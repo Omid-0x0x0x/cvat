@@ -9,24 +9,29 @@ This is the native, Docker-free desktop distribution work in progress.
 - Projects and service data persist under macOS Application Support.
 - Docker is not used.
 
-## Current app bootstrap design
+## Current app design
 
-The first launch checks for Homebrew and installs missing native prerequisites:
-Python 3.12, PostgreSQL 15, Redis, FFmpeg, OpenLDAP, Cyrus SASL, XMLSec, Cairo, and Pango.
-It then creates a private Python virtual environment in Application Support, installs the
-CVAT production requirements, initializes PostgreSQL, starts Redis, Kvrocks and OPA, runs
-Django and Redis migrations, and starts the API and RQ worker processes.
+The app is self-contained. `desktop/macos/app/vendor` is filled by the CI workflow and shipped
+inside the DMG:
 
-The app bundle is expected to contain:
-- The built CVAT React frontend.
-- CVAT backend source and Python requirements.
-- A native ARM64 Kvrocks binary.
-- An OPA binary.
-- The Electron application and local API/static-file proxy.
+- `python/` - python-build-standalone CPython 3.12 with the CVAT production requirements installed.
+- `lib/` - native libraries (OpenLDAP, Cyrus SASL, XMLSec, ...) copied from Homebrew at build time
+  and re-linked with `@loader_path` by `scripts/relocate_macho.py`.
+- `postgres/` - relocatable PostgreSQL 15 binaries.
+- `redis-server`, `kvrocks`, `opa` - native ARM64 binaries.
 
-Homebrew is currently a first-run prerequisite. The app installs missing formulas itself,
-but a fully self-contained DMG without Homebrew or other external runtime dependencies
-requires additional dependency bundling and macOS compatibility tests.
+On launch the app initializes PostgreSQL in Application Support, starts Redis, Kvrocks and OPA,
+runs the Django and Redis migrations, and starts the API, RQ worker and scheduler. Nothing is
+downloaded or compiled on the user's Mac, so neither Homebrew nor the Xcode Command Line Tools
+are needed.
+
+Homebrew is used only on the CI runner. The workflow fails the build if any bundled Mach-O file
+still references a library outside `/usr/lib` or `/System`, and it runs the packaged app's real
+runtime with `/opt/homebrew` moved out of the way.
+
+Auto-annotation needs a separately run Nuclio server: see `NUCLIO.md`.
+
+`scripts/native-cvat-smoke.sh` is an older development script that still expects Homebrew.
 
 ## Build requirements
 
