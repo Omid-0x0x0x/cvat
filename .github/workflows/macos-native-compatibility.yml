@@ -39,8 +39,8 @@ jobs:
       - name: Install native build dependencies
         run: |
           brew install \
-            autoconf automake cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
-            openldap opa pkgconf postgresql@15 redis
+            autoconf automake cairo cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
+            openldap opa pango pkgconf postgresql@15 redis
 
       - name: Configure native library paths
         shell: bash
@@ -66,6 +66,13 @@ jobs:
             cvat/requirements/base.txt
             cvat/requirements/production.txt
             utils/dataset_manifest/requirements.txt
+
+      - name: Restore native pkg-config paths
+        shell: bash
+        run: |
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix cairo)/lib/pkgconfig:$(brew --prefix pango)/lib/pkgconfig:$(brew --prefix pixman)/lib/pkgconfig:$(brew --prefix openldap)/lib/pkgconfig:$(brew --prefix cyrus-sasl)/lib/pkgconfig:$(brew --prefix libxmlsec1)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
 
       - name: Install CVAT backend requirements natively
         run: |
@@ -113,7 +120,7 @@ jobs:
 
       - name: Build the pinned Kvrocks service for macOS ARM64
         run: |
-          git clone --depth 1 --branch 2.15.0 https://github.com/apache/kvrocks.git "$RUNNER_TEMP/kvrocks"
+          git clone --depth 1 --branch v2.15.0 https://github.com/apache/kvrocks.git "$RUNNER_TEMP/kvrocks"
           cd "$RUNNER_TEMP/kvrocks"
           ./x.py build -DCMAKE_BUILD_TYPE=Release
           test -x build/kvrocks
