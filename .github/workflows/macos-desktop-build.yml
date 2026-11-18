@@ -127,7 +127,10 @@ jobs:
           OPA_VERSION="1.22.4"
           curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static" -o desktop/macos/app/vendor/opa
           curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static.sha256" -o "$RUNNER_TEMP/opa.sha256"
-          (cd desktop/macos/app/vendor && shasum -a 256 -c "$RUNNER_TEMP/opa.sha256")
+          # The published .sha256 names the original download file, but we saved it as "opa",
+          # so verify the hash against the local file name instead of using `shasum -c` on the raw file.
+          EXPECTED_OPA_SHA="$(awk '{print $1}' "$RUNNER_TEMP/opa.sha256")"
+          echo "${EXPECTED_OPA_SHA}  desktop/macos/app/vendor/opa" | shasum -a 256 -c -
           chmod 755 desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
           file desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
           otool -L desktop/macos/app/vendor/kvrocks | tee "$RUNNER_TEMP/kvrocks-dylibs.txt"
