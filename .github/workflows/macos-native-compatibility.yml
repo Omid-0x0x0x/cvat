@@ -96,13 +96,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: yarn
 
-      - name: Install frontend dependencies
+      - name: Activate repository-pinned Yarn
         run: |
           corepack enable
+          corepack prepare yarn@4.9.2 --activate
           yarn --version
-          yarn install --immutable
+
+      - name: Install frontend dependencies
+        run: yarn install --immutable
 
       - name: Build the CVAT React frontend
         run: |
@@ -142,7 +144,7 @@ jobs:
           port 56666
           daemonize no
           log-dir $WORK/kvrocks-log
-          db-path $WORK/kvrocks-data
+          dir $WORK/kvrocks-data
           EOF
           "$RUNNER_TEMP/kvrocks/build/kvrocks" -c "$WORK/kvrocks.conf" \
             >"$WORK/kvrocks-console.log" 2>&1 &
