@@ -41,7 +41,7 @@ jobs:
         run: |
           brew install \
             autoconf automake cairo cmake cyrus-sasl ffmpeg libtool libxmlsec1 \
-            openldap opa pango pkgconf postgresql@15 python@3.12 redis
+            openldap pango pkgconf postgresql@15 python@3.12 redis
 
       - name: Configure native library paths
         shell: bash
@@ -124,7 +124,10 @@ jobs:
         run: |
           mkdir -p desktop/macos/app/vendor
           cp "$RUNNER_TEMP/kvrocks/build/kvrocks" desktop/macos/app/vendor/kvrocks
-          cp -L "$(command -v opa)" desktop/macos/app/vendor/opa
+          OPA_VERSION="1.22.4"
+          curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static" -o desktop/macos/app/vendor/opa
+          curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_darwin_arm64_static.sha256" -o "$RUNNER_TEMP/opa.sha256"
+          (cd desktop/macos/app/vendor && shasum -a 256 -c "$RUNNER_TEMP/opa.sha256")
           chmod 755 desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
           file desktop/macos/app/vendor/kvrocks desktop/macos/app/vendor/opa
           otool -L desktop/macos/app/vendor/kvrocks | tee "$RUNNER_TEMP/kvrocks-dylibs.txt"
