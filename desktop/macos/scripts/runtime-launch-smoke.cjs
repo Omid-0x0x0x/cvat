@@ -83,6 +83,16 @@ async function main() {
         workDir: process.env.CVAT_TEST_SAM2_WORKDIR,
       });
     }
+  } catch (error) {
+    // Show what the services logged, so a CI failure can be diagnosed from the job log alone.
+    for (const name of ["backend.log", "worker.log"]) {
+      const file = path.join(userDataDir, "logs", name);
+      if (fs.existsSync(file)) {
+        const tail = fs.readFileSync(file, "utf8").split("\n").slice(-60).join("\n");
+        console.error("----- last lines of " + name + " -----\n" + tail);
+      }
+    }
+    throw error;
   } finally {
     await runtime.stop();
     console.log("Native CVAT services stopped cleanly.");

@@ -13,14 +13,17 @@ const execFileAsync = promisify(execFile);
 
 const FRAMES = 8;
 
-async function api(base, token, method, route, { json, form } = {}) {
-  const headers = { Authorization: "Token " + token, Accept: "application/vnd.cvat+json" };
+async function api(base, token, method, route, { json, form, headers: extraHeaders } = {}) {
+  const headers = { Authorization: "Token " + token, Accept: "application/vnd.cvat+json", ...extraHeaders };
   let body;
   if (json !== undefined) { headers["Content-Type"] = "application/json"; body = JSON.stringify(json); }
   if (form) body = form;
   const response = await fetch(base + route, { method, headers, body });
   const text = await response.text();
-  if (!response.ok) throw new Error(method + " " + route + " -> HTTP " + response.status + ": " + text.slice(0, 400));
+  if (!response.ok) {
+    throw new Error(method + " " + route + " -> HTTP " + response.status + " (" + (response.headers.get("content-type") || "no content type") +
+      "): " + (text.slice(0, 600) || "<empty body>"));
+  }
   return text ? JSON.parse(text) : null;
 }
 
@@ -84,13 +87,17 @@ async function runSam2E2E({ info, scriptPath, sourceDir, workDir }) {
   const task = await api(base, token, "POST", "/api/tasks", {
     json: { name: "sam2-e2e", labels: [{ name: "ball", attributes: [] }] },
   });
-  const form = new FormData();
+  // Same three-step upload the CVAT SDK uses: Upload-Start, Upload-Multiple (files), Upload-Finish (parameters).
+  await api(base, token, "POST", "/api/tasks/" + task.id + "/data", { headers: { "Upload-Start": "true" } });
+  const files = new FormData();
   for (let index = 0; index < FRAMES; index += 1) {
     const name = String(index).padStart(5, "0") + ".jpg";
-    form.append("client_files[" + index + "]", new Blob([fs.readFileSync(path.join(framesDir, name))], { type: "image/jpeg" }), name);
+    files.append("client_files[" + index + "]", new Blob([fs.readFileSync(path.join(framesDir, name))], { type: "image/jpeg" }), name);
   }
-  form.append("image_quality", "95");
-  await api(base, token, "POST", "/api/tasks/" + task.id + "/data", { form });
+  await api(base, token, "POST", "/api/tasks/" + task.id + "/data", { form: files, headers: { "Upload-Multiple": "true" } });
+  const finish = new FormData();
+  finish.append("image_quality", "95");
+  await api(base, token, "POST", "/api/tasks/" + task.id + "/data", { form: finish, headers: { "Upload-Finish": "true" } });
   const job = await waitFor(async () => {
     const jobs = await api(base, token, "GET", "/api/jobs?task_id=" + task.id);
     return jobs.results && jobs.results.length ? jobs.results[0] : null;
