@@ -8,12 +8,14 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
 const { createRuntime, NUCLIO_TEMPLATE, nuclioConfigPath } = require("./runtime.cjs");
+const { createSam2Service } = require("./sam2.cjs");
 
 let mainWindow = null;
 let runtime = null;
 let runtimeInfo = null;
 let quitInProgress = false;
 let storedCredentialsPath = null;
+let sam2Service = null;
 
 function resourcePath() {
   return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "../../..");
@@ -112,6 +114,11 @@ function buildMenu() {
           click: showSavedPassword,
         },
         {
+          label: "SAM 2 tracking…",
+          accelerator: "CmdOrCtrl+Shift+T",
+          click: () => { if (sam2Service) sam2Service.openWindow(); },
+        },
+        {
           label: "Auto-annotation (Nuclio) settings…",
           click: openNuclioSettings,
         },
@@ -196,6 +203,12 @@ async function start() {
 
   try {
     runtimeInfo = await runtime.start();
+    sam2Service = createSam2Service({
+      getMainWindow: () => mainWindow,
+      getRuntimeInfo: () => runtimeInfo,
+      resourcesDir: resourcePath(),
+      userDataDir: app.getPath("userData"),
+    });
     await ensureLocalAdmin();
     if (mainWindow && !mainWindow.isDestroyed()) {
       await mainWindow.loadURL(runtimeInfo.url);
@@ -219,6 +232,7 @@ app.on("before-quit", (event) => {
   if (!runtime || quitInProgress) return;
   event.preventDefault();
   quitInProgress = true;
+  if (sam2Service) sam2Service.dispose();
   runtime.stop().finally(() => app.exit(0));
 });
 

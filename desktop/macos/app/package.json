@@ -1,6 +1,6 @@
 {
   "name": "cvat-desktop-macos",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Native macOS desktop host for CVAT Community",
   "main": "main.cjs",
@@ -22,10 +22,15 @@
       "preload.cjs",
       "runtime.cjs",
       "server.cjs",
-      "splash.html"
+      "splash.html",
+      "sam2.cjs",
+      "sam2-preload.cjs",
+      "sam2.html",
+      "sam2-ui.js"
     ],
     "extraResources": [
       { "from": "../runtime", "to": "runtime" },
+      { "from": "../sam2", "to": "sam2", "filter": ["track_sam2.py"] },
       {
         "from": "../../../cvat",
         "to": "backend/cvat",

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+  <title>SAM 2 tracking</title>
+  <style>
+    :root { color-scheme: dark; --bg:#17191e; --panel:#20232a; --line:#333845; --text:#e8eaf0; --muted:#9aa1b2; --accent:#4c8dff; --bad:#ff6b6b; --good:#4cd08a; }
+    * { box-sizing: border-box; }
+    body { margin:0; padding:20px; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    p.lead { margin:0 0 16px; color:var(--muted); }
+    section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+    section[hidden] { display:none; }
+    h2 { font-size:14px; margin:0 0 10px; }
+    label { display:block; margin:10px 0 4px; color:var(--muted); font-size:12px; }
+    input, select { width:100%; padding:8px 10px; border-radius:7px; border:1px solid var(--line); background:#14161b; color:var(--text); font:inherit; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .check { display:flex; gap:8px; align-items:center; margin-top:12px; color:var(--text); font-size:13px; }
+    .check input { width:auto; }
+    button { padding:9px 14px; border-radius:7px; border:1px solid var(--line); background:#2a2e38; color:var(--text); font:inherit; cursor:pointer; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:white; }
+    button:disabled { opacity:.5; cursor:default; }
+    .actions { display:flex; gap:10px; margin-top:14px; }
+    .note { color:var(--muted); font-size:12px; margin-top:10px; }
+    progress { width:100%; height:8px; margin-top:12px; }
+    #log { margin-top:10px; max-height:150px; overflow:auto; font:12px/1.4 ui-monospace, Menlo, monospace; color:var(--muted); white-space:pre-wrap; }
+    #message { margin-top:12px; white-space:pre-wrap; }
+    #message.error { color:var(--bad); } #message.ok { color:var(--good); }
+  </style>
+</head>
+<body>
+  <h1>SAM 2 tracking</h1>
+  <p class="lead">Select an object on one frame and let SAM 2 follow it through the next frames. Everything runs on this Mac.</p>
+
+  <section id="setup" hidden>
+    <h2>One-time setup</h2>
+    <p>SAM 2 needs PyTorch and a model file. They are downloaded once (about 1 GB in total, most of it PyTorch)
+      and stored in this app's data folder. Your annotations and images are never uploaded.</p>
+    <label for="setupModel">Model</label>
+    <select id="setupModel"></select>
+    <div class="actions"><button id="install" class="primary">Download and install</button></div>
+    <p class="note">Sources: PyTorch from the Python Package Index, model from Hugging Face (checksum verified).</p>
+  </section>
+
+  <section id="track" hidden>
+    <h2>Track an object</h2>
+    <p class="note" style="margin-top:0">First save your work in CVAT (Ctrl+S): only saved objects can be tracked.</p>
+    <div class="row">
+      <div><label for="job">Job ID</label><input id="job" type="number" min="1"></div>
+      <div><label for="frame">Frame</label><input id="frame" type="number" min="0"></div>
+    </div>
+    <div class="actions"><button id="load">Load objects on this frame</button></div>
+
+    <label for="object">Object</label>
+    <select id="object" disabled><option>Load the objects first</option></select>
+
+    <div class="row">
+      <div><label for="count">Number of frames to track</label><input id="count" type="number" min="1" max="5000" value="100"></div>
+      <div><label for="direction">Direction</label>
+        <select id="direction"><option value="forward">Forward</option><option value="backward">Backward</option></select></div>
+    </div>
+    <div class="row">
+      <div><label for="model">Model</label><select id="model"></select></div>
+      <div><label for="device">Computing device</label>
+        <select id="device"><option value="auto">Automatic (Apple GPU if possible)</option><option value="mps">Apple GPU (MPS)</option><option value="cpu">CPU</option></select></div>
+    </div>
+    <label class="check"><input id="replace" type="checkbox" checked> Replace the original single-frame shape with the new track</label>
+    <div class="actions">
+      <button id="run" class="primary" disabled>Start tracking</button>
+      <button id="cancel" hidden>Cancel</button>
+      <button id="reload" hidden>Reload the job to see the result</button>
+    </div>
+  </section>
+
+  <progress id="bar" max="1" value="0" hidden></progress>
+  <div id="log"></div>
+  <div id="message"></div>
+  <script src="sam2-ui.js"></script>
+</body>
+</html>

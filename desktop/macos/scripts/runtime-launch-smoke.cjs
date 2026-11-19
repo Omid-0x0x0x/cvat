@@ -73,6 +73,16 @@ async function main() {
     });
     process.stdout.write(result.stdout);
     console.log("Desktop runtime integration test passed.");
+
+    if (process.env.CVAT_TEST_SAM2_WORKDIR) {
+      const { runSam2E2E } = require("./sam2-e2e.cjs");
+      await runSam2E2E({
+        info,
+        scriptPath: path.join(resourcesDir, "sam2", "track_sam2.py"),
+        sourceDir: path.join(resourcesDir, "vendor", "sam2"),
+        workDir: process.env.CVAT_TEST_SAM2_WORKDIR,
+      });
+    }
   } finally {
     await runtime.stop();
     console.log("Native CVAT services stopped cleanly.");

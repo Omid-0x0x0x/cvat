@@ -120,8 +120,32 @@ jobs:
           export XMLSEC1_CONFIG="$XMLSEC_PREFIX/bin/xmlsec1-config"
           "$PY" -m pip install --no-cache-dir --upgrade pip setuptools wheel
           "$PY" -m pip install --no-cache-dir -r cvat/requirements/production.txt
+          # Pure-Python dependencies of the SAM 2 tracker (PyTorch is downloaded by the app on demand)
+          "$PY" -m pip install --no-cache-dir -r desktop/macos/sam2/requirements.txt
           "$PY" -m pip check
           "$PY" -m compileall -q cvat utils/dataset_manifest manage.py
+          "$PY" -m unittest desktop/macos/sam2/test_geometry.py -v
+
+      - name: Bundle the SAM 2 source code (pinned commit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SAM2_COMMIT="2b90b9f5ceec907a1c18123530e92e794ad901a4"
+          VENDOR="$GITHUB_WORKSPACE/desktop/macos/app/vendor"
+          mkdir -p "$RUNNER_TEMP/sam2-src"
+          cd "$RUNNER_TEMP/sam2-src"
+          git init -q
+          git fetch -q --depth 1 https://github.com/facebookresearch/sam2.git "$SAM2_COMMIT"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$SAM2_COMMIT"
+          rm -rf "$VENDOR/sam2"
+          mkdir -p "$VENDOR/sam2"
+          cp -R sam2 "$VENDOR/sam2/sam2"
+          cp LICENSE "$VENDOR/sam2/LICENSE"
+          cp LICENSE_cctorch "$VENDOR/sam2/LICENSE_cctorch" 2>/dev/null || true
+          echo "$SAM2_COMMIT" > "$VENDOR/sam2/COMMIT"
+          test -f "$VENDOR/sam2/sam2/build_sam.py"
+          ls "$VENDOR/sam2/sam2/configs/sam2.1"
 
       - name: Bundle native libraries used by Python and PostgreSQL extensions
         shell: bash
@@ -225,7 +249,7 @@ jobs:
 
       # The real test: start every service from the packaged app with Homebrew moved
       # out of the way and a minimal environment, as on a clean Mac.
-      - name: Hide Homebrew and run the packaged runtime
+      - name: Hide Homebrew and run the packaged runtime, then SAM 2 tracking end to end
         shell: bash
         run: |
           set -euo pipefail
@@ -237,6 +261,7 @@ jobs:
           test ! -e /opt/homebrew
           env -i HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" PATH="$NODE_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
             CVAT_TEST_RESOURCES="$RESOURCES" CVAT_TEST_USERDATA="$USERDATA" \
+            CVAT_TEST_SAM2_WORKDIR="$RUNNER_TEMP/sam2-e2e" \
             node desktop/macos/scripts/runtime-launch-smoke.cjs
 
       - name: Restore Homebrew

@@ -1,6 +1,14 @@
-# CVAT Desktop for macOS — Preview 0.2.1
+# CVAT Desktop for macOS — Preview 0.3.0
 
 This is an experimental Apple Silicon desktop build of CVAT Community.
+
+## What is new in 0.3.0
+
+- **SAM 2 tracking (experimental).** *CVAT Desktop → SAM 2 tracking…* (⌘⇧T): pick a polygon, mask or
+  rectangle on a frame, choose how many frames to follow (for example 100) and the direction, and SAM 2.1
+  creates a new track in the same job. It runs on this Mac (Apple GPU or CPU); no Docker or Nuclio is needed.
+  The SAM 2 code is inside the app; PyTorch (about 1 GB) and the model file (156-324 MB) are downloaded
+  once, only after you confirm in the window. See `desktop/macos/SAM2.md`.
 
 ## What is new in 0.2.1
 
