@@ -1,6 +1,13 @@
-# CVAT Desktop for macOS — Preview 0.2.0
+# CVAT Desktop for macOS — Preview 0.2.1
 
 This is an experimental Apple Silicon desktop build of CVAT Community.
+
+## What is new in 0.2.1
+
+- **Fixed:** relaunching the app could fail with `pg_ctl: another server might be running` /
+  `lock file "postmaster.pid" already exists` when PostgreSQL from the previous run had not shut down yet.
+  The app now reuses (or cleanly stops) a PostgreSQL server left over from an earlier run, and shutdown
+  falls back to signalling the server directly if `pg_ctl stop` fails.
 
 ## What is new in 0.2.0
 

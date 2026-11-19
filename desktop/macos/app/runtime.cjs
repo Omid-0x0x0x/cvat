@@ -142,6 +142,62 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     return file;
   }
 
+  function postmasterPid(pgData) {
+    try {
+      const pid = parseInt(fs.readFileSync(path.join(pgData, "postmaster.pid"), "utf8").split("\n")[0], 10);
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function postgresIsRunning(pgData) {
+    try {
+      await execFileAsync(path.join(pgBin, "pg_ctl"), ["-D", pgData, "status"], { env, maxBuffer: 1024 * 1024, timeout: 15000 });
+      return true;
+    } catch {
+      return false; // pg_ctl exits with 3 when no server is running
+    }
+  }
+
+  async function stopPostgres(pgData) {
+    const pgCtl = path.join(pgBin, "pg_ctl");
+    try {
+      await execFileAsync(pgCtl, ["-D", pgData, "-m", "fast", "-w", "-t", "30", "stop"], { env, maxBuffer: 1024 * 1024, timeout: 45000 });
+      return;
+    } catch (error) {
+      log("shutdown", "pg_ctl stop failed: " + String(error.stderr || error.message) + "\n");
+    }
+    // Fall back to signalling the postmaster directly: SIGINT = fast shutdown, SIGQUIT = immediate.
+    const pid = postmasterPid(pgData);
+    if (!pid) return;
+    for (const [signal, waitMs] of [["SIGINT", 20000], ["SIGQUIT", 10000]]) {
+      try { process.kill(pid, signal); } catch { return; }
+      const deadline = Date.now() + waitMs;
+      while (Date.now() < deadline) {
+        if (!fs.existsSync(path.join(pgData, "postmaster.pid"))) return;
+        await delay(250);
+      }
+      log("shutdown", "PostgreSQL did not stop after " + signal + "\n");
+    }
+  }
+
+  // A previous run may have left PostgreSQL running (crash, force quit, or a failed shutdown).
+  // It is our own server on our own data directory, so reuse it instead of failing on
+  // "lock file postmaster.pid already exists".
+  async function ensurePostgres(pgData) {
+    if (await postgresIsRunning(pgData)) {
+      let reachable = false;
+      try { await waitForPort(PORTS.postgres, 5000); reachable = true; } catch { /* stale pid file */ }
+      if (reachable) {
+        log("bootstrap", "Reusing PostgreSQL that is already running for this data directory.\n");
+        return;
+      }
+      await stopPostgres(pgData);
+    }
+    await command(path.join(pgBin, "pg_ctl"), ["-D", pgData, "-l", path.join(logDir, "postgres.log"), "-o", "-h 127.0.0.1 -p " + PORTS.postgres, "-w", "-t", "60", "start"], { cwd: userDataDir });
+  }
+
   async function initialize() {
     fs.mkdirSync(userDataDir, { recursive: true });
     fs.mkdirSync(dataDir, { recursive: true });
@@ -200,11 +256,10 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     status("Starting PostgreSQL…");
     const pgData = path.join(dataDir, "postgres");
     const initdb = path.join(pgBin, "initdb");
-    const pgCtl = path.join(pgBin, "pg_ctl");
     if (!fs.existsSync(path.join(pgData, "PG_VERSION"))) {
       await command(initdb, ["-D", pgData, "-U", "cvat", "--auth-local=trust", "--auth-host=trust", "--encoding=UTF8"], { cwd: userDataDir });
     }
-    await command(pgCtl, ["-D", pgData, "-l", path.join(logDir, "postgres.log"), "-o", "-h 127.0.0.1 -p " + PORTS.postgres, "-w", "start"], { cwd: userDataDir });
+    await ensurePostgres(pgData);
     postgresStarted = true;
     try {
       await command(path.join(pgBin, "createdb"), ["-h", "127.0.0.1", "-p", String(PORTS.postgres), "-U", "cvat", "cvat"], { cwd: userDataDir });
@@ -282,14 +337,7 @@ function createRuntime({ resourcesDir, userDataDir, onStatus = () => {} }) {
     children.clear();
 
     if (postgresStarted && pgBin && env) {
-      const pgCtl = path.join(pgBin, "pg_ctl");
-      try {
-        await execFileAsync(pgCtl, ["-D", path.join(dataDir, "postgres"), "-m", "fast", "-w", "stop"], {
-          env, maxBuffer: 1024 * 1024, timeout: 15000,
-        });
-      } catch (error) {
-        log("shutdown", String(error.stderr || error.message) + "\n");
-      }
+      await stopPostgres(path.join(dataDir, "postgres"));
       postgresStarted = false;
     }
   }
